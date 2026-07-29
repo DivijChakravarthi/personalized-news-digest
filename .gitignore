@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+profile.py
+sent.json
+run.log
+_preview.html
