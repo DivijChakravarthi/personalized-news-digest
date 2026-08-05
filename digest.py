@@ -16,7 +16,6 @@ import logging
 import anthropic
 from dotenv import load_dotenv
 
-from config import PROFILE
 from fetch import fetch_all
 from filter import filter_items
 
@@ -73,58 +72,65 @@ def _get_client() -> anthropic.Anthropic:
     return _client
 
 
-# Explicit schema handed to the API via output_config.format -- this is what
-# makes "strict JSON only" actually strict: Claude's response is constrained
-# to match this shape, not just asked nicely to. See _validate() below for
-# the business rules this schema *can't* express (item count, links that
-# must match a real candidate, section must be one of ours).
-_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "items": {
-            "type": "array",
+def _build_json_schema(sections: list[str]) -> dict:
+    """Schema handed to the API via output_config.format -- this is what
+    makes "strict JSON only" actually strict: Claude's response is
+    constrained to match this shape, not just asked nicely to. See
+    _validate() below for the business rules this schema *can't* express
+    (item count, links that must match a real candidate, section must be
+    one of the profile's).
+
+    A function, not a module-level constant, because "sections" now comes
+    from whichever profile is running -- different profiles have different
+    section lists.
+    """
+    return {
+        "type": "object",
+        "properties": {
             "items": {
-                "type": "object",
-                "properties": {
-                    "headline": {
-                        "type": "string",
-                        "description": "Your own headline, not copied from the source",
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "headline": {
+                            "type": "string",
+                            "description": "Your own headline, not copied from the source",
+                        },
+                        "two_sentence_summary": {
+                            "type": "string",
+                            "description": "Exactly two sentences, entirely in your own words -- never reproduce article text",
+                        },
+                        "why_it_matters": {
+                            "type": "string",
+                            "description": "Why this matters to THIS specific reader, not a generic explanation",
+                        },
+                        "section": {
+                            "type": "string",
+                            "description": f"One of: {', '.join(sections)}",
+                        },
+                        "theme": {
+                            "type": "string",
+                            "description": (
+                                "A short (2-6 word) normalized label for the underlying story/event, "
+                                "e.g. 'Fed July rate decision', 'Iran-Israel ceasefire'. Two items about "
+                                "the same real-world event/story must get the IDENTICAL theme string, "
+                                "even if their headlines differ or they come from different sources -- "
+                                "this is used mechanically to detect thematic overlap, not shown to the reader."
+                            ),
+                        },
+                        "link": {
+                            "type": "string",
+                            "description": "Copied verbatim from the candidate's link field",
+                        },
                     },
-                    "two_sentence_summary": {
-                        "type": "string",
-                        "description": "Exactly two sentences, entirely in your own words -- never reproduce article text",
-                    },
-                    "why_it_matters": {
-                        "type": "string",
-                        "description": "Why this matters to THIS specific reader, not a generic explanation",
-                    },
-                    "section": {
-                        "type": "string",
-                        "description": f"One of: {', '.join(PROFILE['sections'])}",
-                    },
-                    "theme": {
-                        "type": "string",
-                        "description": (
-                            "A short (2-6 word) normalized label for the underlying story/event, "
-                            "e.g. 'Fed July rate decision', 'Iran-Israel ceasefire'. Two items about "
-                            "the same real-world event/story must get the IDENTICAL theme string, "
-                            "even if their headlines differ or they come from different sources -- "
-                            "this is used mechanically to detect thematic overlap, not shown to the reader."
-                        ),
-                    },
-                    "link": {
-                        "type": "string",
-                        "description": "Copied verbatim from the candidate's link field",
-                    },
+                    "required": ["headline", "two_sentence_summary", "why_it_matters", "section", "theme", "link"],
+                    "additionalProperties": False,
                 },
-                "required": ["headline", "two_sentence_summary", "why_it_matters", "section", "theme", "link"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["items"],
-    "additionalProperties": False,
-}
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
 
 
 def _build_candidate_block(candidates: list[dict]) -> str:
@@ -141,12 +147,12 @@ def _build_candidate_block(candidates: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_prompt(candidates: list[dict], retry_note: str = "") -> str:
+def _build_prompt(candidates: list[dict], profile: dict, retry_note: str = "") -> str:
     candidate_block = _build_candidate_block(candidates)
-    sections = ", ".join(PROFILE["sections"])
+    sections = ", ".join(profile["sections"])
     return f"""You are curating a daily news digest for one specific reader. Here is who they are:
 
-{PROFILE['about']}
+{profile['about']}
 
 Below are {len(candidates)} candidate articles, pre-filtered by keyword relevance (a cheap
 mechanical pass -- not a judgment of what actually belongs in the digest). Your job is
@@ -200,7 +206,7 @@ Rules:
 Respond with JSON only, matching the required schema. List items in "items" in rank order."""
 
 
-def _validate(parsed: dict, candidates: list[dict]) -> list[str]:
+def _validate(parsed: dict, candidates: list[dict], profile: dict) -> list[str]:
     """Business-rule checks the JSON schema can't express by itself: schema
     validation (already enforced by output_config.format) guarantees the
     *shape* is right, but not that the item count is sane, that "section"
@@ -218,7 +224,7 @@ def _validate(parsed: dict, candidates: list[dict]) -> list[str]:
         errors.append(f"got {len(items)} items, max is {CANDIDATE_BUFFER}")
 
     valid_links = {c["link"] for c in candidates}
-    valid_sections = set(PROFILE["sections"])
+    valid_sections = set(profile["sections"])
     for i, item in enumerate(items):
         if item.get("link") not in valid_links:
             errors.append(f"item {i}: link {item.get('link')!r} doesn't match any candidate")
@@ -299,15 +305,17 @@ def _accumulate_usage(usage: dict, response) -> None:
     )
 
 
-def generate_digest(candidates: list[dict]) -> tuple[list[dict], dict]:
-    """The one Anthropic API call for the whole pipeline. Retries once on
-    malformed/invalid output -- "malformed" covers both JSON that fails to
-    parse (shouldn't happen with output_config.format, but a refusal or SDK
-    hiccup is real) and JSON that parses fine but breaks a business rule
-    the schema can't express (wrong item count, a hallucinated link, an
-    off-list section). The retry re-sends the same candidates with the
-    specific problems appended, so Claude gets one chance to self-correct
-    against the exact failure rather than guessing what went wrong.
+def generate_digest(candidates: list[dict], profile: dict) -> tuple[list[dict], dict]:
+    """The one Anthropic API call for the whole pipeline, curating for
+    `profile` (the internal shape from profiles.to_internal_profile()).
+    Retries once on malformed/invalid output -- "malformed" covers both
+    JSON that fails to parse (shouldn't happen with output_config.format,
+    but a refusal or SDK hiccup is real) and JSON that parses fine but
+    breaks a business rule the schema can't express (wrong item count, a
+    hallucinated link, an off-list section). The retry re-sends the same
+    candidates with the specific problems appended, so Claude gets one
+    chance to self-correct against the exact failure rather than guessing
+    what went wrong.
 
     Returns (items, usage) -- usage accumulates tokens/cost across every
     attempt (including failed ones) so main.py can log run cost even when
@@ -318,6 +326,7 @@ def generate_digest(candidates: list[dict]) -> tuple[list[dict], dict]:
         return [], usage
 
     client = _get_client()
+    schema = _build_json_schema(profile["sections"])
     retry_note = ""
 
     for attempt in (1, 2):
@@ -333,8 +342,8 @@ def generate_digest(candidates: list[dict]) -> tuple[list[dict], dict]:
         with client.messages.stream(
             model=MODEL,
             max_tokens=32000,
-            output_config={"format": {"type": "json_schema", "schema": _JSON_SCHEMA}},
-            messages=[{"role": "user", "content": _build_prompt(candidates, retry_note)}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+            messages=[{"role": "user", "content": _build_prompt(candidates, profile, retry_note)}],
         ) as stream:
             response = stream.get_final_message()
         _accumulate_usage(usage, response)
@@ -361,7 +370,7 @@ def generate_digest(candidates: list[dict]) -> tuple[list[dict], dict]:
             )
             continue
 
-        errors = _validate(parsed, candidates)
+        errors = _validate(parsed, candidates, profile)
         if not errors:
             return _enforce_diversity_caps(parsed["items"], candidates), usage
 
@@ -375,11 +384,17 @@ def generate_digest(candidates: list[dict]) -> tuple[list[dict], dict]:
 
 
 if __name__ == "__main__":
-    raw_items = fetch_all()
-    result = filter_items(raw_items)
+    from profiles import load_profiles, to_internal_profile
+
+    stored = load_profiles()[0]
+    profile = to_internal_profile(stored)
+    print(f"Testing with profile {stored['id']!r}\n")
+
+    raw_items = fetch_all(stored["feeds"])
+    result = filter_items(raw_items, profile)
     print(f"\n{result['count']} candidates passed filtering, sending to Claude...\n")
 
-    digest, usage = generate_digest(result["items"])
+    digest, usage = generate_digest(result["items"], profile)
     print(f"{len(digest)} items selected (~${usage['estimated_cost_usd']:.4f}, {usage['attempts']} attempt(s)):\n")
     for item in digest:
         print(f"[{item['section']}] {item['headline']}")

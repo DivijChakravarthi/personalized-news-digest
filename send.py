@@ -15,7 +15,7 @@ import resend
 from dotenv import load_dotenv
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from config import EMAIL, PROFILE
+from config import EMAIL_FROM
 
 load_dotenv()
 
@@ -58,37 +58,46 @@ def build_subject(items: list[dict], date: datetime | None = None) -> str:
     return f"{date_str}: {items[0]['headline']}"
 
 
-def send_digest(items: list[dict], to: str | None = None) -> dict:
+def send_digest(items: list[dict], to: str, reply_to: str | None = None) -> dict:
     """Sends via Resend. Raises on failure rather than swallowing it --
     main.py decides what a failed send means for sent.json (see main.py:
     links are only appended after this returns successfully), so this
     function's only job is send-or-raise, not partial bookkeeping.
+
+    `to` is required now (no config fallback) -- recipients are per-profile
+    (see profiles.json), not a single global default. `reply_to` defaults
+    to `to` itself, so replying to the digest just emails the same reader
+    back; override it if that's ever not what you want.
     """
     resend.api_key = os.environ["RESEND_API_KEY"]
 
     html = render_digest_html(items)
     subject = build_subject(items)
-    recipient = to or EMAIL["to"]
 
     params = {
-        "from": EMAIL["from"],
-        "to": [recipient],
+        "from": EMAIL_FROM,
+        "to": [to],
         "subject": subject,
         "html": html,
-        "reply_to": EMAIL["reply_to"],
+        "reply_to": reply_to or to,
     }
     response = resend.Emails.send(params)
-    logger.info("Sent digest to %s (Resend id: %s)", recipient, response.get("id") if hasattr(response, "get") else response)
+    logger.info("Sent digest to %s (Resend id: %s)", to, response.get("id") if hasattr(response, "get") else response)
     return response
 
 
 if __name__ == "__main__":
+    from profiles import load_profiles
+
+    stored = load_profiles()[0]
+    sections = stored["sections"]
+
     sample_items = [
         {
             "headline": "Sample headline for template preview",
             "two_sentence_summary": "This is a placeholder summary sentence. This is the second placeholder sentence.",
             "why_it_matters": "This is a placeholder why-it-matters line, shown in italics.",
-            "section": PROFILE["sections"][0],
+            "section": sections[0],
             "link": "https://example.com/test-article-1",
             "source": "Example Source",
         },
@@ -96,7 +105,7 @@ if __name__ == "__main__":
             "headline": "Second sample item in a different section",
             "two_sentence_summary": "Another placeholder summary. Second sentence for this one too.",
             "why_it_matters": "Placeholder relevance line for the second item.",
-            "section": PROFILE["sections"][1] if len(PROFILE["sections"]) > 1 else PROFILE["sections"][0],
+            "section": sections[1] if len(sections) > 1 else sections[0],
             "link": "https://example.com/test-article-2",
             "source": "Another Example Source",
         },
@@ -110,7 +119,7 @@ if __name__ == "__main__":
     print(f"Subject line would be: {build_subject(sample_items)!r}")
 
     if os.environ.get("RESEND_API_KEY"):
-        if input("RESEND_API_KEY is set -- send a real test email now? [y/N] ").strip().lower() == "y":
-            send_digest(sample_items)
+        if input(f"RESEND_API_KEY is set -- send a real test email to {stored['recipient_email']} now? [y/N] ").strip().lower() == "y":
+            send_digest(sample_items, to=stored["recipient_email"])
     else:
         print("RESEND_API_KEY not set -- skipping live send test.")

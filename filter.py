@@ -1,8 +1,9 @@
 """
 Takes raw items from fetch.py and narrows them down to candidates for
 digest.py to hand to Claude: dedupe against sent.json, drop anything
-outside the recency window, score by keyword relevance, keep everything
-with a positive score (capped at TOP_N).
+outside the recency window, score by keyword relevance (against a given
+profile's keywords), keep everything with a positive score (capped at
+TOP_N).
 
 The keyword score here is a cheap pre-filter to keep the Claude call in
 digest.py a manageable size -- it is NOT the thing that decides what's in
@@ -11,7 +12,8 @@ a score threshold; see DEFAULT_MIN_SCORE/MIN_ITEMS_FLOOR/MIN_POSSIBLE_THRESHOLD
 in config.py if a stricter cutoff ever needs to come back.
 
 Run standalone (`python filter.py`) to fetch live feeds, print what
-survives filtering, and see the near-miss diagnostics below the cut line.
+survives filtering, and see the near-miss diagnostics below the cut line --
+uses the first profile in profiles.json.
 """
 
 import json
@@ -20,7 +22,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-from config import MAX_AGE_HOURS, PROFILE
+from config import MAX_AGE_HOURS
 from fetch import fetch_all
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -78,9 +80,13 @@ def _build_keyword_pattern(keyword: str) -> re.Pattern:
     return re.compile(pattern, flags)
 
 
-# Compiled once at import time -- re-compiling per item per keyword would
-# be wasted work across hundreds of items every run.
-_KEYWORD_PATTERNS = {kw: _build_keyword_pattern(kw) for kw in PROFILE["keywords"]}
+def build_keyword_patterns(keywords: dict) -> dict[str, re.Pattern]:
+    """Compile every keyword in a profile's keyword dict once. Multiple
+    profiles now exist (each with different keywords), so this can no
+    longer be a module-level constant computed from one global profile --
+    callers compile once per run (see score_all()) and pass the result
+    down, rather than recompiling per item per keyword."""
+    return {kw: _build_keyword_pattern(kw) for kw in keywords}
 
 
 def load_sent_links() -> set[str]:
@@ -110,7 +116,7 @@ def is_recent(item: dict, max_age_hours: int = MAX_AGE_HOURS) -> bool:
     return item["published"] >= cutoff
 
 
-def score_item(item: dict) -> tuple[int, list[str]]:
+def score_item(item: dict, keywords: dict, patterns: dict[str, re.Pattern] | None = None) -> tuple[int, list[str]]:
     """The entire ranking algorithm lives here: for every profile keyword
     whose word-boundary regex matches, add weight*TITLE_MULTIPLIER if it
     hit the title and/or weight*SUMMARY_MULTIPLIER if it hit the summary
@@ -118,13 +124,19 @@ def score_item(item: dict) -> tuple[int, list[str]]:
     embeddings/whatever without touching filter_items() -- it only cares
     that this returns a comparable number plus a human-readable "what
     matched" list for the near-miss diagnostics below.
+
+    `patterns` lets score_all() pass in patterns compiled once for the
+    whole run instead of recompiling per item; omit it (e.g. for a one-off
+    call, or the near-miss diagnostics below) and it compiles on the fly.
     """
+    if patterns is None:
+        patterns = build_keyword_patterns(keywords)
     title = item["title"]
     summary = item["summary"]
     score = 0
     matched = []
-    for kw, weight in PROFILE["keywords"].items():
-        pattern = _KEYWORD_PATTERNS[kw]
+    for kw, weight in keywords.items():
+        pattern = patterns[kw]
         if pattern.search(title):
             contribution = weight * TITLE_MULTIPLIER
             score += contribution
@@ -136,15 +148,19 @@ def score_item(item: dict) -> tuple[int, list[str]]:
     return score, matched
 
 
-def score_all(items: list[dict], sent_links: set[str] | None = None) -> list[tuple[int, dict, list[str]]]:
-    """Dedupe/drop-stale/drop-junk, then score everything -- no threshold
-    applied yet. Returns (score, item, matched) sorted by score descending
-    (ties broken by recency). filter_items() applies the actual cutoff to
-    this; the __main__ block below also uses the unfiltered list directly
-    for near-miss diagnostics.
+def score_all(items: list[dict], profile: dict, sent_links: set[str] | None = None) -> list[tuple[int, dict, list[str]]]:
+    """Dedupe/drop-stale/drop-junk, then score everything against `profile`
+    (the internal shape from profiles.to_internal_profile()) -- no
+    threshold applied yet. Returns (score, item, matched) sorted by score
+    descending (ties broken by recency). filter_items() applies the actual
+    cutoff to this; the __main__ block below also uses the unfiltered list
+    directly for near-miss diagnostics.
     """
     if sent_links is None:
         sent_links = load_sent_links()
+
+    keywords = profile["keywords"]
+    patterns = build_keyword_patterns(keywords)
 
     scored = []
     for item in items:
@@ -154,14 +170,14 @@ def score_all(items: list[dict], sent_links: set[str] | None = None) -> list[tup
             continue
         if not is_recent(item):
             continue
-        score, matched = score_item(item)
+        score, matched = score_item(item, keywords, patterns)
         scored.append((score, item, matched))
 
     scored.sort(key=lambda t: (t[0], t[1]["published"]), reverse=True)
     return scored
 
 
-def filter_items(items: list[dict], sent_links: set[str] | None = None, top_n: int = TOP_N) -> dict:
+def filter_items(items: list[dict], profile: dict, sent_links: set[str] | None = None, top_n: int = TOP_N) -> dict:
     """Returns {"items", "count", "all_scored"}.
 
     No threshold, no floor-relaxation: keeps everything with score > 0
@@ -170,7 +186,7 @@ def filter_items(items: list[dict], sent_links: set[str] | None = None, top_n: i
     is Claude's job in digest.py, not this module's -- this just needs to
     hand over a manageably-sized, roughly-ranked candidate pool.
     """
-    scored = score_all(items, sent_links)
+    scored = score_all(items, profile, sent_links)
     selected = [t for t in scored if t[0] > 0][:top_n]
     return {
         "items": [t[1] for t in selected],
@@ -180,12 +196,18 @@ def filter_items(items: list[dict], sent_links: set[str] | None = None, top_n: i
 
 
 if __name__ == "__main__":
-    raw_items = fetch_all()
-    result = filter_items(raw_items)
+    from profiles import load_profiles, to_internal_profile
+
+    stored = load_profiles()[0]
+    profile = to_internal_profile(stored)
+    print(f"Testing with profile {stored['id']!r}\n")
+
+    raw_items = fetch_all(stored["feeds"])
+    result = filter_items(raw_items, profile)
 
     print(f"\n{result['count']} / {len(raw_items)} items passed filtering (score > 0, capped at {TOP_N})\n")
     for item in result["items"]:
-        score, matched = score_item(item)
+        score, matched = score_item(item, profile["keywords"])
         print(f"[{score:3d}] [{item['source']}] {item['title']}")
         print(f"      {item['link']}")
         print(f"      matched: {', '.join(matched)}")

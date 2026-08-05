@@ -1,9 +1,11 @@
 """
-Pulls every feed in config.FEEDS and normalizes entries into plain dicts:
+Pulls every feed in a given feed list (each profile in profiles.json has
+its own) and normalizes entries into plain dicts:
 {title, link, summary, source, published}
 
 Run standalone (`python fetch.py`) to sanity-check that feeds are alive and
-what raw volume they produce, before any filtering happens.
+what raw volume they produce, before any filtering happens -- uses the
+first profile in profiles.json.
 """
 
 import calendar
@@ -15,7 +17,7 @@ from datetime import datetime, timezone
 
 import feedparser
 
-from config import FEEDS
+import config  # noqa: F401 -- sets feedparser.USER_AGENT as a side effect on import
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -131,18 +133,23 @@ def fetch_feed(feed: dict) -> list[dict]:
     return items
 
 
-def fetch_all() -> list[dict]:
+def fetch_all(feeds: list[dict]) -> list[dict]:
     all_items = []
-    for feed in FEEDS:
+    for feed in feeds:
         feed_items = fetch_feed(feed)
         logger.info("%-35s %d items", feed["name"], len(feed_items))
         all_items.extend(feed_items)
-    logger.info("Fetched %d items total from %d feeds", len(all_items), len(FEEDS))
+    logger.info("Fetched %d items total from %d feeds", len(all_items), len(feeds))
     return all_items
 
 
 if __name__ == "__main__":
-    items = fetch_all()
+    from profiles import load_profiles
+
+    profile = load_profiles()[0]
+    print(f"Testing with profile {profile['id']!r} ({len(profile['feeds'])} feeds)\n")
+
+    items = fetch_all(profile["feeds"])
     print(f"\n{len(items)} total items fetched\n")
     for it in items[:15]:
         print(f"- [{it['source']}] {it['title']}")

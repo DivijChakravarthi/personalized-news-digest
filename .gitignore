@@ -3,7 +3,7 @@ venv/
 __pycache__/
 *.pyc
 .env
-profile.py
+profiles.json
 sent.json
 run.log
 _preview.html
