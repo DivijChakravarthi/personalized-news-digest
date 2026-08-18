@@ -7,3 +7,5 @@ profiles.json
 sent.json
 run.log
 _preview.html
+/frontend/node_modules
+/frontend/dist

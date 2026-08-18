@@ -23,6 +23,7 @@ import profiles as profile_store
 from digest import DigestGenerationError, generate_digest
 from fetch import fetch_all
 from filter import filter_items
+from keyword_gen import KeywordGenerationError, generate_keywords
 from main import LOG_FILE
 from main import run as run_pipeline
 
@@ -40,22 +41,46 @@ def list_profiles():
 
 @app.route("/api/profiles", methods=["POST"])
 def create_profile():
+    """A new profile has no keyword taxonomy yet, so generation always
+    runs here (unlike PUT, there's no "did anything change" to check).
+    """
     data = request.get_json(force=True, silent=True)
     if not data or not data.get("name"):
         return jsonify({"error": "profile must include at least a 'name'"}), 400
+    try:
+        data["keywords"], data["negative_keywords"] = generate_keywords(data)
+    except KeywordGenerationError as e:
+        return jsonify({"error": str(e)}), 502
     created = profile_store.create_profile(data)
     return jsonify(created), 201
 
 
 @app.route("/api/profiles/<profile_id>", methods=["PUT"])
 def update_profile(profile_id):
+    """The frontend never sends keywords/negative_keywords -- they're not
+    editable there anymore. Keywords are (re)generated from the identity
+    fields (name/age/industry/position/company/about/sections/
+    topics_to_avoid) only when one of those actually changed, so e.g.
+    fixing a typo in a feed URL doesn't burn a Claude call.
+    """
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "request body must be a JSON profile object"}), 400
     try:
-        updated = profile_store.update_profile(profile_id, data)
+        existing = profile_store.get_profile(profile_id)
     except KeyError:
         return jsonify({"error": f"no profile with id {profile_id!r}"}), 404
+
+    if not existing.get("keywords") or profile_store.identity_changed(existing, data):
+        try:
+            data["keywords"], data["negative_keywords"] = generate_keywords(data)
+        except KeywordGenerationError as e:
+            return jsonify({"error": str(e)}), 502
+    else:
+        data["keywords"] = existing["keywords"]
+        data["negative_keywords"] = existing["negative_keywords"]
+
+    updated = profile_store.update_profile(profile_id, data)
     return jsonify(updated)
 
 
@@ -102,6 +127,7 @@ def preview_digest():
         {
             "profile_id": profile_id,
             "items": digest_items,
+            "raw_count": len(raw_items),
             "candidate_count": filtered["count"],
             "usage": usage,
         }

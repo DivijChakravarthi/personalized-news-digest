@@ -31,14 +31,14 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _log_run(status: str, item_count: int, cost_usd: float | None, detail: str = "") -> None:
+def _log_run(status: str, profile_id: str, item_count: int, cost_usd: float | None, detail: str = "") -> None:
     # Deliberately separate from the logging.basicConfig() output above --
     # that's for watching a run happen interactively; this is an
     # append-only, grep-able record of every run's outcome, meant to
     # answer "did this morning's cron job actually send" after the fact.
     timestamp = datetime.now(timezone.utc).isoformat()
     cost_str = f"${cost_usd:.4f}" if cost_usd is not None else "n/a"
-    line = f"{timestamp}\tstatus={status}\titems={item_count}\tcost={cost_str}"
+    line = f"{timestamp}\tprofile={profile_id}\tstatus={status}\titems={item_count}\tcost={cost_str}"
     if detail:
         line += f"\t{detail}"
     with open(LOG_FILE, "a") as f:
@@ -70,14 +70,14 @@ def run(dry_run: bool = False, to: str | None = None, profile_id: str | None = N
 
     if not filtered["items"]:
         logger.warning("No candidates passed filtering -- nothing to send")
-        _log_run("skipped", 0, None, "no candidates after filtering")
+        _log_run("skipped", stored["id"], 0, None, "no candidates after filtering")
         return {"status": "skipped", "item_count": 0, "cost": None}
 
     try:
         digest_items, usage = generate_digest(filtered["items"], profile)
     except DigestGenerationError as e:
         logger.error("Digest generation failed: %s", e)
-        _log_run("failed", 0, e.usage.get("estimated_cost_usd"), f"digest error: {e}")
+        _log_run("failed", stored["id"], 0, e.usage.get("estimated_cost_usd"), f"digest error: {e}")
         raise
 
     cost = usage.get("estimated_cost_usd")
@@ -99,14 +99,14 @@ def run(dry_run: bool = False, to: str | None = None, profile_id: str | None = N
             print(f"  {item['two_sentence_summary']}")
             print(f"  why it matters: {item['why_it_matters']}")
             print(f"  {item['link']}\n")
-        _log_run("dry-run", len(digest_items), cost)
+        _log_run("dry-run", stored["id"], len(digest_items), cost)
         return {"status": "dry-run", "item_count": len(digest_items), "cost": cost, "items": digest_items}
 
     try:
         send_digest(digest_items, to=recipient)
     except Exception as e:
         logger.error("Send failed: %s", e)
-        _log_run("failed", len(digest_items), cost, f"send error: {e}")
+        _log_run("failed", stored["id"], len(digest_items), cost, f"send error: {e}")
         raise
 
     # Only mark links as sent AFTER a successful send. If send_digest
@@ -115,7 +115,7 @@ def run(dry_run: bool = False, to: str | None = None, profile_id: str | None = N
     # digest even though the reader never actually saw them today.
     append_sent_links([item["link"] for item in digest_items])
     logger.info("Sent %d items and updated sent.json", len(digest_items))
-    _log_run("success", len(digest_items), cost)
+    _log_run("success", stored["id"], len(digest_items), cost)
     return {"status": "success", "item_count": len(digest_items), "cost": cost}
 
 
