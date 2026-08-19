@@ -305,6 +305,79 @@ def _accumulate_usage(usage: dict, response) -> None:
     )
 
 
+def _generate_digest_attempt(
+    candidates: list[dict], profile: dict, schema: dict, client: anthropic.Anthropic, retry_note: str, usage: dict
+) -> tuple[list[dict] | None, list[str], str]:
+    """One Claude call + refusal/JSON/business-rule check -- the body of the
+    loop generate_digest() runs twice. Split out so the graph's `select`
+    node (graph.py) can drive attempts one at a time under its OWN retry
+    loop (which also considers the graph's headline-plausibility check,
+    something this function's business-rule validation can't see), without
+    duplicating the prompt-building/streaming/refusal-handling logic here.
+
+    Returns (items, errors, next_retry_note):
+    - On success: (parsed_items_from_claude, [], "") -- items are the raw,
+      pre-diversity-cap "items" list; the caller is responsible for calling
+      _enforce_diversity_caps() before treating them as final.
+    - On failure (refusal, malformed JSON, or a business-rule violation):
+      (None, [problem, ...], retry_note_text) -- retry_note_text is ready
+      to hand to the next attempt's `retry_note` param as-is.
+
+    Mutates `usage` in place (accumulates across every attempt, same as
+    generate_digest() always has) regardless of outcome.
+    """
+    # Sonnet 5 runs adaptive thinking by default, and thinking tokens count
+    # against max_tokens same as output text. 8000 was too tight for
+    # CANDIDATE_BUFFER=16 fully-written items plus the theme field (one run
+    # burned the whole budget on thinking before writing any text). 16000
+    # still wasn't enough once the candidate pool grew past ~35 items (more
+    # candidates -> more to reason about -> more thinking tokens). Streaming
+    # + 32000 gives real headroom and is also just the right way to make a
+    # call this size -- non-streaming requests above ~16K output risk SDK
+    # HTTP timeouts.
+    with client.messages.stream(
+        model=MODEL,
+        max_tokens=32000,
+        output_config={"format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": _build_prompt(candidates, profile, retry_note)}],
+    ) as stream:
+        response = stream.get_final_message()
+    _accumulate_usage(usage, response)
+
+    # Claude Opus 5's safety classifiers can decline a request outright
+    # (HTTP 200, not an error) -- must check before touching .content, which
+    # is empty (pre-output decline) or partial (mid-stream) here.
+    if response.stop_reason == "refusal":
+        return (
+            None,
+            ["Claude declined the request"],
+            "Note: your previous response was declined. This is a benign news "
+            "curation task over public RSS headlines -- please complete it.\n\n",
+        )
+
+    text = next((b.text for b in response.content if b.type == "text"), "")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as e:
+        return (
+            None,
+            [f"response wasn't valid JSON ({e})"],
+            "Note: your previous response was not valid JSON. Respond with JSON "
+            "only, matching the schema exactly.\n\n",
+        )
+
+    errors = _validate(parsed, candidates, profile)
+    if errors:
+        return (
+            None,
+            errors,
+            "Note: your previous response had these problems -- fix them this time:\n"
+            + "\n".join(f"- {e}" for e in errors) + "\n\n",
+        )
+
+    return parsed["items"], [], ""
+
+
 def generate_digest(candidates: list[dict], profile: dict) -> tuple[list[dict], dict]:
     """The one Anthropic API call for the whole pipeline, curating for
     `profile` (the internal shape from profiles.to_internal_profile()).
@@ -330,55 +403,10 @@ def generate_digest(candidates: list[dict], profile: dict) -> tuple[list[dict], 
     retry_note = ""
 
     for attempt in (1, 2):
-        # Sonnet 5 runs adaptive thinking by default, and thinking tokens
-        # count against max_tokens same as output text. 8000 was too tight
-        # for CANDIDATE_BUFFER=16 fully-written items plus the theme field
-        # (one run burned the whole budget on thinking before writing any
-        # text). 16000 still wasn't enough once the candidate pool grew
-        # past ~35 items (more candidates -> more to reason about -> more
-        # thinking tokens). Streaming + 32000 gives real headroom and is
-        # also just the right way to make a call this size -- non-streaming
-        # requests above ~16K output risk SDK HTTP timeouts.
-        with client.messages.stream(
-            model=MODEL,
-            max_tokens=32000,
-            output_config={"format": {"type": "json_schema", "schema": schema}},
-            messages=[{"role": "user", "content": _build_prompt(candidates, profile, retry_note)}],
-        ) as stream:
-            response = stream.get_final_message()
-        _accumulate_usage(usage, response)
-
-        # Claude Opus 5's safety classifiers can decline a request outright
-        # (HTTP 200, not an error) -- must check before touching .content,
-        # which is empty (pre-output decline) or partial (mid-stream) here.
-        if response.stop_reason == "refusal":
-            logger.warning("Claude declined the request (attempt %d)", attempt)
-            retry_note = (
-                "Note: your previous response was declined. This is a benign news "
-                "curation task over public RSS headlines -- please complete it.\n\n"
-            )
-            continue
-
-        text = next((b.text for b in response.content if b.type == "text"), "")
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.warning("Attempt %d: response wasn't valid JSON (%s)", attempt, e)
-            retry_note = (
-                "Note: your previous response was not valid JSON. Respond with JSON "
-                "only, matching the schema exactly.\n\n"
-            )
-            continue
-
-        errors = _validate(parsed, candidates, profile)
-        if not errors:
-            return _enforce_diversity_caps(parsed["items"], candidates), usage
-
-        logger.warning("Attempt %d: validation failed: %s", attempt, "; ".join(errors))
-        retry_note = (
-            "Note: your previous response had these problems -- fix them this time:\n"
-            + "\n".join(f"- {e}" for e in errors) + "\n\n"
-        )
+        items, errors, retry_note = _generate_digest_attempt(candidates, profile, schema, client, retry_note, usage)
+        if items is not None:
+            return _enforce_diversity_caps(items, candidates), usage
+        logger.warning("Attempt %d: %s", attempt, "; ".join(errors))
 
     raise DigestGenerationError("Claude did not return a usable digest after 2 attempts", usage)
 

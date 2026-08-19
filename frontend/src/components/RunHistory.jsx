@@ -50,6 +50,8 @@ export default function RunHistory({ profiles }) {
           <th>Profile</th>
           <th>Items</th>
           <th>Cost</th>
+          <th>Retries</th>
+          <th>Path</th>
           <th>Status</th>
         </tr>
       </thead>
@@ -60,6 +62,8 @@ export default function RunHistory({ profiles }) {
             <td>{profileName(profiles, run.profile)}</td>
             <td>{run.items ?? "—"}</td>
             <td>{run.cost ?? "—"}</td>
+            <td>{run.retries ?? "—"}</td>
+            <td className="run-path" title={run.path ?? ""}>{run.path ?? "—"}</td>
             <td>
               <span className="status-pill">{run.status ?? "unknown"}</span>
               {run.detail && <span className="run-detail" title={run.detail}> ({run.detail})</span>}

@@ -510,3 +510,13 @@
   color: var(--text-muted);
   font-size: 12px;
 }
+
+.run-path {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
