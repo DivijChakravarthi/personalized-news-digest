@@ -416,6 +416,60 @@
   padding: 2px 6px;
 }
 
+.candidate-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.candidate-table td,
+.candidate-table th {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.candidate-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.score-cell {
+  font-family: var(--mono);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.source-cell {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.matched-keywords-compact {
+  margin-top: 2px;
+  gap: 4px;
+}
+
+.matched-keywords-compact .keyword-tag {
+  font-size: 11px;
+  padding: 1px 5px;
+}
+
+.candidate-table-muted {
+  opacity: 0.7;
+}
+
+.near-miss-heading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 20px 0 8px;
+}
+
 /* ---- Run history ---- */
 
 .run-table {

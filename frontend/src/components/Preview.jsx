@@ -15,6 +15,31 @@ function ElapsedTimer() {
   return <span>{seconds}s</span>;
 }
 
+function CandidateRow({ item }) {
+  return (
+    <tr>
+      <td className="score-cell">{item.score}</td>
+      <td className="source-cell">{item.source}</td>
+      <td>
+        <a href={item.link} target="_blank" rel="noreferrer">
+          {item.title}
+        </a>
+        <div className="matched-keywords matched-keywords-compact">
+          {item.matched_keywords.length === 0 ? (
+            <span className="muted">no keyword matches recorded</span>
+          ) : (
+            item.matched_keywords.map((m, i) => (
+              <span className="keyword-tag" key={i}>
+                {m}
+              </span>
+            ))
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 function ItemCard({ item }) {
   return (
     <article className="preview-item">
@@ -57,16 +82,18 @@ function ItemCard({ item }) {
 
 export default function Preview({ profileId }) {
   const [state, setState] = useState("idle"); // idle | loading | done | error
+  const [mode, setMode] = useState(null); // "score" | "full" -- which result is loaded
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const requestId = useRef(0);
 
-  async function runPreview() {
+  async function run(requestedMode) {
     const thisRequest = ++requestId.current;
     setState("loading");
+    setMode(requestedMode);
     setError(null);
     try {
-      const data = await api.previewDigest(profileId);
+      const data = requestedMode === "score" ? await api.scoreCandidates(profileId) : await api.previewDigest(profileId);
       if (requestId.current !== thisRequest) return; // a newer request superseded this one
       setResult(data);
       setState("done");
@@ -80,19 +107,83 @@ export default function Preview({ profileId }) {
   return (
     <div className="preview-view">
       <div className="preview-controls">
-        <button type="button" className="btn-primary" onClick={runPreview} disabled={state === "loading" || !profileId}>
-          {state === "loading" ? "Running…" : "Run preview"}
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => run("score")}
+          disabled={state === "loading" || !profileId}
+        >
+          {state === "loading" && mode === "score" ? "Scoring…" : "Score only (free)"}
+        </button>
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() => run("full")}
+          disabled={state === "loading" || !profileId}
+        >
+          {state === "loading" && mode === "full" ? "Running…" : "Full preview (~$0.26)"}
         </button>
         {state === "loading" && (
           <span className="loading-indicator">
-            Fetching feeds, filtering, and asking Claude to curate -- usually 30-60s (<ElapsedTimer />)
+            {mode === "score"
+              ? <>Fetching feeds and filtering -- no Claude call ({<ElapsedTimer />})</>
+              : <>Fetching feeds, filtering, and asking Claude to curate -- usually 30-60s (<ElapsedTimer />)</>}
           </span>
         )}
       </div>
 
       {state === "error" && <div className="error-banner">Preview failed: {error}</div>}
 
-      {state === "done" && result && (
+      {state === "done" && result && mode === "score" && (
+        <>
+          <div className="run-stats">
+            <div className="stat">
+              <span className="stat-value">{result.raw_count}</span>
+              <span className="stat-label">raw items fetched</span>
+            </div>
+            <div className="stat">
+              <span className="stat-value">{result.candidate_count}</span>
+              <span className="stat-label">candidates (score &gt; 0)</span>
+            </div>
+            <div className="stat">
+              <span className="stat-value">{result.near_misses.length}</span>
+              <span className="stat-label">near-misses shown</span>
+            </div>
+          </div>
+
+          <table className="candidate-table">
+            <thead>
+              <tr>
+                <th>Score</th>
+                <th>Source</th>
+                <th>Headline / matched keywords</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.candidates.map((item, i) => (
+                <CandidateRow item={item} key={item.link ?? i} />
+              ))}
+            </tbody>
+          </table>
+
+          {result.near_misses.length > 0 && (
+            <>
+              <h2 className="near-miss-heading">
+                Top near-misses (score &le; 0, didn't pass the filter)
+              </h2>
+              <table className="candidate-table candidate-table-muted">
+                <tbody>
+                  {result.near_misses.map((item, i) => (
+                    <CandidateRow item={item} key={item.link ?? i} />
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </>
+      )}
+
+      {state === "done" && result && mode === "full" && (
         <>
           <div className="run-stats">
             <div className="stat">

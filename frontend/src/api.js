@@ -54,5 +54,11 @@ export const api = {
       body: JSON.stringify({ profile_id: profileId }),
     }),
 
+  scoreCandidates: (profileId) =>
+    apiFetch("/api/digest/candidates", {
+      method: "POST",
+      body: JSON.stringify({ profile_id: profileId }),
+    }),
+
   listRuns: () => apiFetch("/api/runs"),
 };

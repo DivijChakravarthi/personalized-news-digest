@@ -134,6 +134,59 @@ def preview_digest():
     )
 
 
+# Near-misses (score <= 0) can be the bulk of ~800 raw items -- most tell
+# you nothing ("random sports story, 0 keyword hits"). Only the
+# highest-scoring near-misses are useful for spotting a missing keyword,
+# so cap what's returned rather than shipping hundreds of zero-signal rows.
+NEAR_MISS_LIMIT = 30
+
+
+@app.route("/api/digest/candidates", methods=["POST"])
+def score_candidates():
+    """Runs fetch -> filter only (no Claude call) and returns every scored
+    candidate, so keyword weights can be tuned by watching scores move
+    without paying for a digest generation each time. Includes the
+    near-misses (score <= 0) too -- seeing what almost matched is what
+    tells you a keyword is missing, not just what already works.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    profile_id = data.get("profile_id")
+    if not profile_id:
+        return jsonify({"error": "request body must include 'profile_id'"}), 400
+
+    try:
+        stored = profile_store.get_profile(profile_id)
+    except KeyError:
+        return jsonify({"error": f"no profile with id {profile_id!r}"}), 404
+
+    profile = profile_store.to_internal_profile(stored)
+    raw_items = fetch_all(stored["feeds"])
+    filtered = filter_items(raw_items, profile)
+
+    def _serialize(score, item, matched):
+        return {
+            "title": item["title"],
+            "link": item["link"],
+            "source": item["source"],
+            "published": item["published"].isoformat(),
+            "score": score,
+            "matched_keywords": matched,
+        }
+
+    passed_links = {i["link"] for i in filtered["items"]}
+    near_misses = [t for t in filtered["all_scored"] if t[1]["link"] not in passed_links][:NEAR_MISS_LIMIT]
+
+    return jsonify(
+        {
+            "profile_id": profile_id,
+            "raw_count": len(raw_items),
+            "candidate_count": filtered["count"],
+            "candidates": [_serialize(*t) for t in filtered["all_scored"] if t[1]["link"] in passed_links],
+            "near_misses": [_serialize(*t) for t in near_misses],
+        }
+    )
+
+
 @app.route("/api/digest/send", methods=["POST"])
 def send_digest_route():
     """Full pipeline for one profile, actually sends. Reuses main.run()
