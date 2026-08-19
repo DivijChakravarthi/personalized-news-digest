@@ -122,11 +122,6 @@
         "name": "Risk.net",
         "url": "https://www.risk.net/feeds/rss",
         "category": "trade"
-      },
-      {
-        "name": "Private Debt Investor",
-        "url": "https://www.privatedebtinvestor.com/feed/",
-        "category": "trade"
       }
     ]
   }

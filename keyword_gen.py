@@ -50,7 +50,15 @@ _SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "keyword": {"type": "string", "description": "Lowercase, 1-4 words"},
+                    "keyword": {
+                        "type": "string",
+                        "description": (
+                            "1-4 words. Lowercase for ordinary phrases. Bare acronyms/proper "
+                            "nouns (Fed, CPI, FOMC, Powell) keep their natural capitalization "
+                            "instead -- the filter matches those case-sensitively, which is "
+                            "what keeps 'Fed' from firing on unrelated lowercase text."
+                        ),
+                    },
                     "weight": {
                         "type": "integer",
                         "enum": [1, 2, 3, 4, 5],
@@ -102,8 +110,22 @@ weight from 5 (central to their day-to-day, e.g. their own employer or core subj
 matter) down to 1 (loosely related, worth surfacing but not a priority).
 
 Favor precise, specific terms over generic ones ("basis trade" over "finance"; a named
-competitor over "competitors"). Keywords should be lowercase, short (1-4 words), and not
-overlap heavily in meaning with each other.
+competitor over "competitors"). Keywords should be short (1-4 words) and not overlap
+heavily in meaning with each other.
+
+Real headlines lean on short forms, not the compounds you might reach for by default --
+"Fed minutes", not "federal reserve minutes"; "CPI print", not "consumer price index
+report". A keyword-matching filter that only knows the long/compound form (e.g. "fed dot
+plot", "fed funds rate", "federal reserve balance sheet") will silently miss the plain
+short form ("Fed" on its own) that headlines actually use most often. So for every entity,
+event type, or acronym that has both a common short form and a longer/compound form,
+include BOTH as separate keyword entries -- e.g. both "fed" and "federal reserve balance
+sheet", both "cpi" and "cpi report", both "powell" and "jerome powell". Write bare
+acronyms in their natural capitalization (e.g. "Fed", "CPI", "FOMC", "ECB", "BOJ", "BOE",
+"SEC", "GDP") rather than forcing them lowercase -- the filter treats a mixed-case keyword
+as case-sensitive, which also avoids false hits on unrelated lowercase words (a
+capitalized "Fed" won't fire on "fed up"). Multi-word phrases should stay lowercase as
+usual.
 
 Also generate a short list of negative keywords: specific terms that should be actively
 suppressed even if they'd otherwise match, expanded from the "topics to avoid" above into
@@ -143,7 +165,13 @@ def generate_keywords(profile: dict) -> tuple[dict, dict]:
 
         keywords = {}
         for item in parsed.get("keywords", []):
-            kw = item["keyword"].strip().lower()
+            # Not force-lowercased: filter.py's _build_keyword_pattern()
+            # treats a mixed-case keyword as case-sensitive on purpose (see
+            # the schema description above) -- lowercasing here would
+            # silently turn every generated "Fed"/"CPI"/"Powell" into a
+            # case-insensitive match, undoing the whole point of asking for
+            # natural capitalization.
+            kw = item["keyword"].strip()
             if kw:
                 keywords[kw] = item["weight"]
 

@@ -138,6 +138,15 @@ def fetch_all(feeds: list[dict]) -> list[dict]:
     for feed in feeds:
         feed_items = fetch_feed(feed)
         logger.info("%-35s %d items", feed["name"], len(feed_items))
+        # fetch_feed() never raises (a dead feed just yields []), so a feed
+        # that's actually broken -- wrong URL, moved behind a paywall,
+        # serving HTML instead of XML -- degrades silently into "0 items"
+        # instead of an error. Left alone, that's invisible until someone
+        # notices weeks later that a source has been contributing nothing.
+        # A WARNING here (not a raise) surfaces it immediately in the run
+        # log without killing the run over one dead source.
+        if not feed_items:
+            logger.warning("%s returned 0 items -- feed may be dead, moved, or paywalled", feed["name"])
         all_items.extend(feed_items)
     logger.info("Fetched %d items total from %d feeds", len(all_items), len(feeds))
     return all_items
